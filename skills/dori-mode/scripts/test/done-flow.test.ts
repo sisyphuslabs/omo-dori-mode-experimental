@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
-import { claimDone, closeLane, objectDone, watchTick } from "../src/done-flow.ts";
+import { abandonLane, claimDone, closeLane, objectDone, watchTick } from "../src/done-flow.ts";
 import { sendVerified, UnsafeTextError } from "../src/panes.ts";
 import { type Lane, statusOf } from "../src/registry.ts";
 import { depsFor, fakeClock, newWorld, sent, withState, type World, WT } from "./fakes.ts";
@@ -89,6 +89,22 @@ test("closing directly refuses while a signal is not live and leaves the pane al
   expect(r.closed).toBe(false);
   expect(r.lines.at(-1)).toStartWith("REFUSED demo-lane");
   expect(closedVia()).toHaveLength(0);
+});
+
+test("a lane that failed at startup is abandoned without Done checks; its tab closes and worktrees stay", async () => {
+  world.prState = "OPEN";
+  const line = await abandonLane(at(T0), { ...lane, tab: "w:t3" }, "STARTUP_ERROR usage limit");
+  expect(line).toStartWith("ABANDONED demo-lane");
+  expect(closedVia()).toEqual([["herdr", "tab", "close", "w:t3"]]);
+  expect(world.calls.some((c) => c[0] === "gh" || c.includes("remove"))).toBe(false);
+  const after = await at(T0).registry.read("demo-lane");
+  expect(after && statusOf(after)).toBe("closed");
+  expect(after?.history?.at(-1)?.note).toBe("abandoned: STARTUP_ERROR usage limit");
+});
+
+test("a done claim counts as the lane replying", async () => {
+  await claimDone(at(T0 + MIN), lane, "merged acme/app#1");
+  expect((await at(T0).registry.read("demo-lane"))?.lastReplyAt).toBe(T0 + MIN);
 });
 
 test("text still sitting in the pane input gets another Enter until it is gone", async () => {

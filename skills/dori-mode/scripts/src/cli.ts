@@ -3,12 +3,13 @@ import { parseArgs } from "node:util";
 
 import { loadConfig } from "./config.ts";
 import { deadPaneTick } from "./dead-panes.ts";
-import { claimDone, closeLane, type FlowDeps, objectDone, watchTick } from "./done-flow.ts";
+import { abandonLane, claimDone, closeLane, type FlowDeps, objectDone, watchTick } from "./done-flow.ts";
 import { freshnessTick } from "./freshness.ts";
 import { acquireSlot, pidAlive, releaseSlot } from "./heavy-slot.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
 import { adoptLane, launchLane, LaunchError } from "./launch.ts";
 import { Registry, statusOf } from "./registry.ts";
+import { UnsafeTextError } from "./panes.ts";
 import { realClock, run } from "./run.ts";
 import { syncRegistry } from "./sync.ts";
 import { canLaunch } from "./routing.ts";
@@ -17,7 +18,7 @@ import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
-import { Telegram } from "./messenger/telegram.ts";
+import { parseTelegramRef, Telegram } from "./messenger/telegram.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { realTimers } from "./messenger/typing.ts";
 import { transcribe, TranscriptionError } from "./messenger/voice.ts";
@@ -30,6 +31,7 @@ const USAGE = `dori <command> [options]
   claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID
   object-done <key> --reason TEXT [--reason TEXT ...]
   close  <key> [--note TEXT]           close now (Done signals must read back live)
+  abandon <key> --reason TEXT          close without Done checks (STARTUP_ERROR or dropped lane); worktrees are kept
   watch                                long-running: emits LANE_* lines every 30 s
   freshness [--loop MIN]               nudge silent lanes, post their last report via hooks.threadReply
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
@@ -63,6 +65,10 @@ const flags = parseArgs({
     to: { type: "string" }, text: { type: "string" }, edit: { type: "string" },
   },
 });
+const known = new Set(["title", "brief", "done", "thread", "model", "cwd", "pane", "evidence", "reason", "note", "write", "loop", "to", "text", "edit"]);
+const sepAt = rest.indexOf("--");
+const unknown = (sepAt >= 0 ? rest.slice(0, sepAt) : rest).filter((a) => a.startsWith("--") && !known.has(a.slice(2).split("=")[0] ?? ""));
+if (unknown.length) die(`unknown option ${unknown.map((a) => a.split("=")[0]).join(", ")}; valid: ${[...known].map((k) => `--${k}`).join(" ")}`);
 const opt = (name: string): string | undefined => {
   const v = flags.values[name];
   return typeof v === "string" ? v.trim() : undefined;
@@ -120,6 +126,11 @@ try {
       const r = await closeLane(deps, await lane(key ?? die("close needs a lane key")), opt("note") ?? "closed by the lead");
       for (const line of r.lines) console.log(line);
       process.exit(r.closed ? 0 : 2);
+    }
+    case "abandon": {
+      const reason = (flags.values.reason as string[] | undefined)?.map((r) => r.trim()).filter(Boolean).join("; ") || die("--reason is required");
+      console.log(await abandonLane(deps, await lane(key ?? die("abandon needs a lane key")), reason));
+      break;
     }
     case "watch":
       console.log("LANE_WATCH_READY");
@@ -180,9 +191,19 @@ try {
         else console.log(`SENT ${(await slack.post(to, text, thread)).ts}`);
       } else if (platform === "telegram") {
         const tg = new Telegram(fetchHttp, realClock, token("DORI_TELEGRAM_TOKEN"));
-        const target = { chatId: to, ...(thread ? { threadId: Number(thread) } : {}) };
+        const ref = parseTelegramRef(to);
+        const threadId = thread ? Number(thread) : ref.threadId;
+        const target = { chatId: ref.chatId, ...(threadId ? { threadId } : {}) };
         if (edit) await tg.edit(target, Number(edit), text);
-        else console.log(`SENT ${await tg.send(target, text)}`);
+        else {
+          const sent = await tg.send(target, text).catch(async (e: unknown) => {
+            // a lane ref like telegram:<chat>:<n> may name a message, not a forum topic; still reach the chat
+            if (!(e instanceof MessengerError) || !/thread not found/i.test(e.message) || !target.threadId) throw e;
+            console.error(`WARN topic ${target.threadId} not found in chat ${target.chatId}; sent to the chat without a topic`);
+            return tg.send({ chatId: target.chatId }, text);
+          });
+          console.log(`SENT ${sent}`);
+        }
       } else if (platform === "discord") {
         const dc = new Discord(fetchHttp, realClock, token("DORI_DISCORD_TOKEN"));
         if (edit) await dc.edit(to, edit, text);
@@ -233,6 +254,6 @@ try {
       process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError) die(e.message);
+  if (e instanceof LaunchError || e instanceof UnsafeTextError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError) die(e.message);
   throw e;
 }

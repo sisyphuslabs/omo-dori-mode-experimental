@@ -27,6 +27,7 @@ test("a lane silent past the nudge time is nudged once, then its last report is 
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
   await deps(T0).registry.write(working);
   world.screen = "noise\n[REPORT] quiet-lane | milestone | tests green on /home/test/repo, PR open\n❯ ";
+  await deps(T0).registry.write({ ...working, lastReport: "[REPORT] quiet-lane | milestone | tests green on /home/test/repo, PR open" });
   expect(await freshnessTick(deps(T0 + 10 * MIN), "/home/test")).toEqual([]);
   expect((await freshnessTick(deps(T0 + 16 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
   expect((await freshnessTick(deps(T0 + 17 * MIN), "/home/test")).map((a) => a.kind)).toEqual([]);
@@ -36,6 +37,17 @@ test("a lane silent past the nudge time is nudged once, then its last report is 
   expect(call?.[1]).toBe("chat:team/9");
   expect(call?.[2]).toContain("tests green on ~/repo, PR open");
   expect(sent(world)).toHaveLength(1);
+});
+
+test("a new report line on the pane records lastReplyAt and resets the silence clock", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir);
+  await deps(T0).registry.write(working);
+  world.screen = "[REPORT] quiet-lane | milestone | step one done\n❯ ";
+  expect(await freshnessTick(deps(T0 + 14 * MIN), "/home/test")).toEqual([]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReplyAt).toBe(T0 + 14 * MIN);
+  expect(await freshnessTick(deps(T0 + 20 * MIN), "/home/test")).toEqual([]);
+  expect((await deps(T0).registry.read("quiet-lane"))?.lastReplyAt).toBe(T0 + 14 * MIN);
+  expect((await freshnessTick(deps(T0 + 30 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
 });
 
 test("a stopped agent pane is reported once per hour and the lead pane is never reported", async () => {

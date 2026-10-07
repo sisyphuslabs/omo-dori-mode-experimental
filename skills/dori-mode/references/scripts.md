@@ -57,8 +57,10 @@ Every module takes its HTTP, clock and timers as arguments. That is how the test
 
 ## Commands
 
+Every command refuses an unknown `--flag` (exit 1, listing the valid ones), so a typo never runs silently. Arguments after a literal `--` (as in `dori heavy`) are not checked. A lane file in the registry that is not valid JSON is skipped with `LANE_FILE_UNREADABLE <path>` on stderr, so one broken file never stops `watch`, `freshness` or `sync`.
+
 ### `dori launch <key> --title T --brief FILE --done "..." [--thread REF] [--model M] [--cwd DIR]`
-Opens a lane: appends the footer to the brief, opens a tab, starts the agent, and checks the pane for startup errors after 20 seconds. Exit 3 on `STARTUP_ERROR`.
+Opens a lane: writes the footer into the brief (replacing a footer an earlier launch wrote, so the brief keeps exactly one), opens a tab, starts the agent, and checks the pane for startup errors after 20 seconds. Exit 3 on `STARTUP_ERROR`. `--model` is refused when `agentCommand` has no `{model}` placeholder, because the model would otherwise be dropped silently. A key whose lane is closed (for example abandoned after `STARTUP_ERROR`) can be launched or adopted again; the old record moves to `<stateDir>/lanes/archive/`. A key whose lane is still open is refused.
 
 ### `dori adopt <key> --pane ID --title T --brief FILE --done "..." [--thread REF]`
 Registers a lane that is already running.
@@ -76,7 +78,7 @@ Closes a lane now. Refuses (exit 2) unless every `Done =` signal reads back live
 Runs forever. Every 30 seconds it prints each new claim once (`LANE_DONE_CLAIMED`). Claims older than `closeAfterMin` are settled: unpushed or uncommitted work and failing signals turn into objections (`LANE_NOT_DONE`); otherwise the lane is closed (`LANE_CLOSED`). The deadline lives in the registry, so a restart picks up where it left off.
 
 ### `dori freshness [--loop MIN]`
-For working lanes that have gone quiet: a nudge in the pane after `nudgeAfterMin`, then the lane's last `[REPORT]` line posted to its thread after `postAfterMin`, with home paths and pane ids scrubbed. Each happens once per silence.
+For working lanes that have gone quiet: a nudge in the pane after `nudgeAfterMin`, then the lane's last `[REPORT]` line posted to its thread after `postAfterMin`, with home paths and pane ids scrubbed. Each happens once per silence. If `hooks.threadReply` exits non-zero, it prints `POST-FAILED <lane> exit N: ...` and does not record the post, so the next tick tries again.
 
 ### `dori dead-panes [--loop MIN]`
 Prints `DEAD_PANE <id>` once per hour for a pane whose last lines match `deadPanePatterns`.
@@ -88,7 +90,7 @@ Prints `HOST_GUARD ALERT <reasons>` when load, free memory, free disk or the pan
 Prints `CAN_LAUNCH` and exits 0 when the host has room for another lane. Otherwise it prints `HOLD <reasons>` and exits 4. The reasons come from the guard's memory, disk and pane-count thresholds. CPU load alone never holds a launch, because it moves too fast to plan around.
 
 ### `dori send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]`
-Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN` (plus `DORI_SLACK_COOKIE` for a user token), `DORI_TELEGRAM_TOKEN` or `DORI_DISCORD_TOKEN`. Text containing `$(` is refused, since it can only come from a shell string. Rate limits are retried with the server's wait time; other errors fail at once.
+Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN` (plus `DORI_SLACK_COOKIE` for a user token), `DORI_TELEGRAM_TOKEN` or `DORI_DISCORD_TOKEN`. Text containing `$(` is refused, since it can only come from a shell string. Rate limits are retried with the server's wait time; other errors fail at once. For Telegram, `--to` also takes a lane thread ref (`telegram:<chat>:<topic>` or `telegram:<chat>/<topic>`), so `hooks.threadReply` can pass `{thread}` straight through; if that topic does not exist, the message goes to the chat without a topic and a `WARN` line goes to stderr. Telegram text over 4096 characters is sent as several messages (cut at a newline where possible), and the id of the first one is printed.
 
 ### `dori presence <slack|discord>`
 Keeps the account shown as online until stopped.
