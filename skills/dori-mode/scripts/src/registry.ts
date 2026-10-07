@@ -28,6 +28,7 @@ export type Lane = {
   readonly openedAt: string;
   readonly closedAt?: string;
   readonly lastReplyAt?: number;
+  readonly lastReport?: string;
   readonly lastNudgeAt?: number;
   readonly lastAutoReplyAt?: number;
   readonly receipt?: unknown;
@@ -65,10 +66,26 @@ export class Registry {
     renameSync(tmp, this.path(lane.key));
   }
 
+  async archive(lane: Lane): Promise<string> {
+    const dir = join(this.dir, "archive");
+    mkdirSync(dir, { recursive: true });
+    const dest = join(dir, `${lane.key}.${(lane.closedAt ?? new Date().toISOString()).replace(/[:.]/g, "-")}.json`);
+    renameSync(this.path(lane.key), dest);
+    return dest;
+  }
+
   async list(): Promise<Lane[]> {
     mkdirSync(this.dir, { recursive: true });
     const lanes: Lane[] = [];
-    for (const f of readdirSync(this.dir)) if (f.endsWith(".json")) lanes.push((await Bun.file(join(this.dir, f)).json()) as Lane);
+    for (const f of readdirSync(this.dir)) {
+      if (!f.endsWith(".json")) continue;
+      const p = join(this.dir, f);
+      try {
+        lanes.push((await Bun.file(p).json()) as Lane);
+      } catch (err) {
+        console.error(`LANE_FILE_UNREADABLE ${p}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     return lanes;
   }
 

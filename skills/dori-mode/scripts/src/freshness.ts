@@ -18,7 +18,7 @@ export const scrubForThread = (line: string, home: string): string =>
     .replace(/`/g, "'")
     .trim();
 
-export type SweepAct = { readonly kind: "nudged" | "posted" | "no-report"; readonly lane: string; readonly detail: string };
+export type SweepAct = { readonly kind: "nudged" | "posted" | "post-failed" | "no-report"; readonly lane: string; readonly detail: string };
 
 const lastHeard = (lane: Lane): number => lane.lastReplyAt ?? Date.parse(lane.openedAt);
 
@@ -27,9 +27,15 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
   const now = deps.clock.now();
   for (const lane of await deps.registry.open()) {
     if (statusOf(lane) !== "working" || !lane.pane) continue;
-    const heard = lastHeard(lane);
-    const silentMin = Math.round((now - heard) / 60_000);
+    const report = lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key);
     let current = lane;
+    if (report && report !== lane.lastReport) {
+      // a new [REPORT] line on the pane is the lane replying: freshness counts from here
+      current = { ...current, lastReport: report, lastReplyAt: now };
+      await deps.registry.write(current);
+    }
+    const heard = lastHeard(current);
+    const silentMin = Math.round((now - heard) / 60_000);
     if (silentMin >= deps.config.nudgeAfterMin && (current.lastNudgeAt ?? 0) < heard) {
       await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] your work thread has had no update for ${silentMin} min. Post a 1-2 sentence progress line (done since last, next) and keep its status true.`);
       current = { ...current, lastNudgeAt: now };
@@ -38,13 +44,17 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
     }
     const hook = deps.config.hooks.threadReply;
     if (silentMin >= deps.config.postAfterMin && hook && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
-      const report = lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key);
       if (!report) {
         acts.push({ kind: "no-report", lane: lane.key, detail: "pane has no [REPORT] line" });
         continue;
       }
       const text = `Progress (from the lane's last report): ${scrubForThread(report, home)}`;
-      await deps.run(fill(hook, { thread: lane.thread, text, key: lane.key }));
+      const r = await deps.run(fill(hook, { thread: lane.thread, text, key: lane.key }));
+      if (r.code !== 0) {
+        // not recorded as posted, so the next tick retries
+        acts.push({ kind: "post-failed", lane: lane.key, detail: `exit ${r.code}: ${(r.err || r.out).trim().slice(0, 160)}` });
+        continue;
+      }
       await deps.registry.write({ ...current, lastAutoReplyAt: now });
       acts.push({ kind: "posted", lane: lane.key, detail: text });
     }

@@ -1,6 +1,29 @@
 import type { Clock } from "../run.ts";
 import { guardText, type Http, MessengerError, withBackoff } from "./http.ts";
 
+// Telegram rejects sendMessage text over 4096 characters; chunks join back to the exact original
+export const splitForTelegram = (text: string, limit = 4096): string[] => {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > limit) {
+    let cut = rest.lastIndexOf("\n", limit - 1) + 1;
+    if (cut <= limit / 2) cut = limit;
+    const code = rest.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff) cut--;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  out.push(rest);
+  return out;
+};
+
+// lane threads are stored as telegram:<chat>:<topic> or telegram:<chat>/<topic>; a bare chat id passes through
+export const parseTelegramRef = (to: string): { readonly chatId: string; readonly threadId?: number } => {
+  const m = /^telegram:(-?\d+)(?:[:/](\d+))?$/.exec(to);
+  if (!m?.[1]) return { chatId: to };
+  return { chatId: m[1], ...(m[2] ? { threadId: Number(m[2]) } : {}) };
+};
+
 export type TgTarget = { readonly chatId: number | string; readonly threadId?: number };
 
 const retryAfter = (body: string): number | undefined => {
@@ -32,8 +55,12 @@ export class Telegram {
   }
 
   async send(t: TgTarget, text: string, rich = false): Promise<number> {
-    const r = await this.call<{ message_id: number }>("sendMessage", { ...this.where(t), text: guardText(text), ...(rich ? { parse_mode: "HTML" } : {}) });
-    return r.message_id;
+    let first: number | undefined;
+    for (const chunk of splitForTelegram(guardText(text))) {
+      const r = await this.call<{ message_id: number }>("sendMessage", { ...this.where(t), text: chunk, ...(rich ? { parse_mode: "HTML" } : {}) });
+      first ??= r.message_id;
+    }
+    return first as number;
   }
 
   async edit(t: TgTarget, messageId: number, text: string, rich = false): Promise<void> {

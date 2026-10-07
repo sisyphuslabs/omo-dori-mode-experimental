@@ -21,7 +21,7 @@ const windowMs = (deps: FlowDeps): number => deps.config.closeAfterMin * 60_000;
 
 export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string): Promise<string> => {
   const at = iso(deps.clock);
-  await deps.registry.write(withStatus(lane, "done-claimed", evidence, at, { claim: { at, evidence, emitted: false } }));
+  await deps.registry.write(withStatus(lane, "done-claimed", evidence, at, { claim: { at, evidence, emitted: false }, lastReplyAt: deps.clock.now() }));
   if (lane.pane) {
     const closesAt = new Date(deps.clock.now() + windowMs(deps)).toISOString().slice(11, 16);
     await sendVerified(deps.run, deps.clock, lane.pane, `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`);
@@ -86,6 +86,17 @@ export const closeLane = async (deps: FlowDeps, lane: Lane, note: string): Promi
   const receipt = { checks, note, cleanup };
   await deps.registry.write(withStatus(lane, "closed", note, at, { closedAt: at, receipt }));
   return { closed: true, lines: [...lines, `CLOSED ${lane.key} ${JSON.stringify(receipt)}`] };
+};
+
+// for lanes that never got going (STARTUP_ERROR) or were dropped: no Done check, worktrees kept for inspection
+export const abandonLane = async (deps: FlowDeps, lane: Lane, reason: string): Promise<string> => {
+  const cleanup: string[] = [];
+  if (lane.tab) cleanup.push((await deps.run(["herdr", "tab", "close", lane.tab])).code === 0 ? `tab ${lane.tab} closed` : `tab ${lane.tab} not closed`);
+  else if (lane.pane) cleanup.push((await deps.run(["herdr", "pane", "close", lane.pane])).code === 0 ? `pane ${lane.pane} closed` : `pane ${lane.pane} not closed`);
+  const at = iso(deps.clock);
+  const receipt = { abandoned: true, note: reason, cleanup };
+  await deps.registry.write(withStatus(lane, "closed", `abandoned: ${reason}`, at, { closedAt: at, receipt }));
+  return `ABANDONED ${lane.key} ${JSON.stringify(receipt)}`;
 };
 
 const settle = async (deps: FlowDeps, lane: Lane, evidence: string): Promise<string> => {
